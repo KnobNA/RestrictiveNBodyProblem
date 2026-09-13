@@ -29,7 +29,7 @@ Default planets are three equal masses on an equilateral triangle in the first t
 ## Requirements
 
 - Python **3.10+**
-- An NVIDIA GPU with a **CuPy** build that matches your CUDA toolkit ([CuPy install](https://docs.cupy.dev/en/stable/install.html))
+- An **NVIDIA** GPU with a **CuPy** build that matches your CUDA toolkit ([CuPy install](https://docs.cupy.dev/en/stable/install.html)). macOS is not supported (no CUDA).
 - `numpy`, `pillow`
 - **2D stills:** [Manim](https://www.manim.community/)
 - **3D viewer:** [VisPy](https://vispy.org/) with the **glfw** backend (and Tk for the control panel)
@@ -48,7 +48,7 @@ Windows:
 venv\Scripts\activate
 ```
 
-macOS / Linux:
+Linux:
 
 ```bash
 source venv/bin/activate
