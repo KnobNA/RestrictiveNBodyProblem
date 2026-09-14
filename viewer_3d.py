@@ -29,10 +29,11 @@ from simulation import (
     lattice_sample_values,
     planet_3flat_ball,
     simulate_volume,
+    time_to_hit_rgb,
 )
 
 # --- knobs (new simulation only; ignored when opening a saved model) ---
-RESOLUTION = 48
+RESOLUTION = 50
 HALF_EXTENT = 1.25
 CUBE_CENTER = (0.0, 0.0, 0.0)
 # Exactly k vectors. First three are the visible cube; further vectors add
@@ -116,6 +117,7 @@ def save_model(
     cube: NDCube,
     resolution: int,
     point_size: float = POINT_SIZE,
+    time: np.ndarray | None = None,
     extra: dict | None = None,
 ) -> Path:
     path = Path(path)
@@ -133,12 +135,14 @@ def save_model(
     }
     if extra:
         meta.update(extra)
-    np.savez_compressed(
-        path,
-        positions=np.asarray(positions, dtype=np.float32),
-        hit=np.asarray(hit, dtype=np.int32),
-        meta=np.asarray(json.dumps(meta)),
-    )
+    payload: dict = {
+        "positions": np.asarray(positions, dtype=np.float32),
+        "hit": np.asarray(hit, dtype=np.int32),
+        "meta": np.asarray(json.dumps(meta)),
+    }
+    if time is not None:
+        payload["time"] = np.asarray(time, dtype=np.float32)
+    np.savez_compressed(path, **payload)
     return path
 
 
@@ -150,6 +154,9 @@ def load_model(path: str | Path) -> dict:
         meta = json.loads(str(data["meta"]))
         positions = np.asarray(data["positions"], dtype=np.float32)
         hit = np.asarray(data["hit"], dtype=np.int32)
+        time = None
+        if "time" in data:
+            time = np.asarray(data["time"], dtype=np.float32)
     version = int(meta.get("version", 1))
     meta.setdefault("relativistic", False)
     meta.setdefault("c_light", 10.0)
@@ -164,6 +171,8 @@ def load_model(path: str | Path) -> dict:
     return {
         "positions": positions,
         "hit": hit,
+        "time": time,
+        "t_max": float(meta.get("t_max", T_MAX)),
         "planets": _planets_from_meta(meta["planets"]),
         "cube": cube,
         "resolution": int(meta.get("resolution", 0)),
@@ -469,6 +478,9 @@ def _apply_layer(
     resolution: int,
     point_size: float,
     canvas,
+    time: np.ndarray | None = None,
+    t_max: float = T_MAX,
+    color_by_time: bool = False,
 ) -> None:
     extra = _extra_coords(cube, resolution, slider_vals)
     layer = _layer_mask(extra_idx, slider_vals, resolution)
@@ -503,9 +515,20 @@ def _apply_layer(
 
         sel = vis & (hit == i)
         pts = xyz[sel]
+        use_time = bool(color_by_time) and time is not None
         if pts.size == 0:
             pts = np.zeros((0, 3), dtype=np.float32)
             face = _rgb01(planet.color)
+        elif use_time:
+            rgb = time_to_hit_rgb(time[sel], t_max)
+            r = rgb[:, 0].astype(np.float32) / 255.0
+            g = rgb[:, 1].astype(np.float32) / 255.0
+            b = rgb[:, 2].astype(np.float32) / 255.0
+            if on_hover is not None:
+                alphas = np.where(on_hover[sel], 1.0, HOVER_DIM_ALPHA).astype(np.float32)
+            else:
+                alphas = np.ones(pts.shape[0], dtype=np.float32)
+            face = np.column_stack([r, g, b, alphas])
         elif on_hover is not None:
             r, g, b, _a = _rgb01(planet.color)
             alphas = np.where(on_hover[sel], 1.0, HOVER_DIM_ALPHA).astype(np.float32)
@@ -544,6 +567,8 @@ def _controls_window(
     resolution: int,
     point_size: float,
     session: dict,
+    time: np.ndarray | None = None,
+    t_max: float = T_MAX,
 ) -> tk.Tk:
     root = tk.Tk()
     root.title("Basin controls")
@@ -570,6 +595,7 @@ def _controls_window(
     slider_vars: list[tk.IntVar] = []
     extra_labels: list[ttk.Label] = []
     picker: PlaneStripPicker | None = None
+    color_by_time_var = tk.BooleanVar(value=False)
 
     def refresh(*_args):
         if len(planet_on) < len(planets) or len(points_on) < len(planets):
@@ -611,6 +637,9 @@ def _controls_window(
             resolution=resolution,
             point_size=point_size,
             canvas=canvas,
+            time=time,
+            t_max=t_max,
+            color_by_time=bool(color_by_time_var.get()),
         )
 
     if n_extra:
@@ -673,6 +702,18 @@ def _controls_window(
             command=refresh,
         ).pack(anchor="w", padx=8, pady=2)
 
+    color_frame = ttk.LabelFrame(root, text="Coloring")
+    color_frame.pack(fill="x", padx=10, pady=6)
+    time_toggle = ttk.Checkbutton(
+        color_frame,
+        text="Color by time to hit  (red = fast, black = t_max)",
+        variable=color_by_time_var,
+        command=refresh,
+    )
+    time_toggle.pack(anchor="w", padx=8, pady=4)
+    if time is None:
+        time_toggle.state(["disabled"])
+
     io_frame = ttk.LabelFrame(root, text="Model")
     io_frame.pack(fill="x", padx=10, pady=8)
 
@@ -694,6 +735,7 @@ def _controls_window(
                 path,
                 positions=positions,
                 hit=hit,
+                time=time,
                 planets=planets,
                 cube=cube,
                 resolution=resolution,
@@ -701,7 +743,7 @@ def _controls_window(
                 extra={
                     "g": G,
                     "dt": DT,
-                    "t_max": T_MAX,
+                    "t_max": t_max,
                     "force_exponent": FORCE_EXPONENT,
                     "softening": SOFTENING,
                     "relativistic": RELATIVISTIC,
@@ -747,7 +789,7 @@ def _simulate_new() -> dict:
     cube = NDCube(center=CUBE_CENTER, axes=CUBE_AXES, half_extent=HALF_EXTENT)
     planets = PLANETS
     print("Simulating n-D volume lattice (this can take a while)...")
-    positions, hit = simulate_volume(
+    positions, hit, time = simulate_volume(
         planets,
         RESOLUTION,
         cube,
@@ -762,6 +804,8 @@ def _simulate_new() -> dict:
     return {
         "positions": positions,
         "hit": hit,
+        "time": time,
+        "t_max": T_MAX,
         "planets": planets,
         "cube": cube,
         "resolution": RESOLUTION,
@@ -798,6 +842,8 @@ def _run_session(model: dict) -> str | None:
         model["resolution"],
         model["point_size"],
         session,
+        time=model.get("time"),
+        t_max=float(model.get("t_max", T_MAX)),
     )
 
     def pump():

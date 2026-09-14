@@ -3,6 +3,7 @@
 Asteroids start at rest at sampled initial positions, move in full n-D under
 fixed-planet Newtonian gravity, and stop on a finite-radius collision or timeout.
 
+-Just curious functionality-
 Optional ``relativistic=True`` uses 1PN test-particle geodesics in a prescribed
 static multi-mass field. Planets are frozen boundary conditions and are not a
 GR-self-consistent spacetime. Visualization and collisions stay in coordinate
@@ -26,6 +27,32 @@ MIN_STEP = 1e-6
 C_LIGHT_DEFAULT = 10.0
 REL_V_MAX_FRAC = 0.999
 WEAK_FIELD_FRAC = 0.1
+TIME_HIT_LUT_SIZE = 256
+_TIME_HIT_STOPS = np.array(
+    [
+        [0.00, 255.0, 0.0, 0.0],
+        [0.20, 255.0, 140.0, 0.0],
+        [0.40, 255.0, 255.0, 0.0],
+        [0.60, 0.0, 200.0, 70.0],
+        [0.80, 30.0, 90.0, 255.0],
+        [1.00, 0.0, 0.0, 0.0],
+    ],
+    dtype=np.float64,
+)
+
+
+def _build_time_hit_lut() -> np.ndarray:
+    """Red (t=0) → orange → yellow → green → blue → black (t=t_max)."""
+    xs = _TIME_HIT_STOPS[:, 0]
+    colors = _TIME_HIT_STOPS[:, 1:]
+    u = np.linspace(0.0, 1.0, TIME_HIT_LUT_SIZE)
+    lut = np.empty((TIME_HIT_LUT_SIZE, 3), dtype=np.uint8)
+    for c in range(3):
+        lut[:, c] = np.clip(np.interp(u, xs, colors[:, c]), 0, 255).astype(np.uint8)
+    return lut
+
+
+TIME_HIT_LUT = _build_time_hit_lut()
 
 
 @dataclass
@@ -815,8 +842,11 @@ def integrate_asteroids(
     max_substeps: int = MAX_SUBSTEPS,
     relativistic: bool = False,
     c_light: float = C_LIGHT_DEFAULT,
-) -> cp.ndarray:
+) -> tuple[cp.ndarray, cp.ndarray]:
     """RK4-integrate asteroids from rest until collision or ``t_max``.
+
+    Returns ``(hit, time)``. ``time`` is the collision clock, or ``t_max`` if
+    the asteroid never hit.
 
     Does not modify the input ``pos`` array; the viewer needs those initial
     lattice coordinates to draw basins.
@@ -960,7 +990,8 @@ def integrate_asteroids(
             f"relativistic diagnostics: max |v|/c = {max_speed / float(c_light):.4g}, "
             f"max |Phi|/c^2 = {max_abs_phi / c2:.4g}"
         )
-    return hit
+    time = cp.where(hit < 0, np.float32(t_max), time)
+    return hit, time
 
 
 def _plane_to_pixel(
@@ -998,6 +1029,48 @@ def colorize_hits(
         palette[i + 1] = cp.asarray(planet.color, dtype=cp.uint8)
     rgb = palette[hit + 1].reshape(height, width, 3)
     return cp.asnumpy(rgb)
+
+
+def time_to_hit_rgb(
+    time,
+    t_max: float,
+    hit=None,
+) -> np.ndarray:
+    """Map collision time to RGB uint8 (N, 3).
+
+    ``t = 0`` is bright red; ``t = t_max`` is black. Timeouts (``hit < 0``)
+    are black even if the clock is slightly under ``t_max``.
+    """
+    if isinstance(time, cp.ndarray):
+        t = cp.asnumpy(time)
+    else:
+        t = np.asarray(time)
+    t = t.reshape(-1).astype(np.float32, copy=False)
+    tmax = float(t_max)
+    if tmax <= 0.0:
+        tmax = 1.0
+    u = np.clip(t / np.float32(tmax), 0.0, 1.0)
+    idx = np.rint(u * (TIME_HIT_LUT_SIZE - 1)).astype(np.int32)
+    rgb = TIME_HIT_LUT[idx]
+    if hit is not None:
+        if isinstance(hit, cp.ndarray):
+            h = cp.asnumpy(hit)
+        else:
+            h = np.asarray(hit)
+        rgb = rgb.copy()
+        rgb[h.reshape(-1) < 0] = 0
+    return rgb
+
+
+def colorize_times(
+    time,
+    t_max: float,
+    width: int,
+    height: int,
+    hit=None,
+) -> np.ndarray:
+    """Time-to-hit RGB uint8 image. Timeouts stay black."""
+    return time_to_hit_rgb(time, t_max, hit=hit).reshape(height, width, 3)
 
 
 def draw_planet_rings(
@@ -1048,6 +1121,7 @@ def render_basins(
     draw_rings: bool = True,
     relativistic: bool = False,
     c_light: float = C_LIGHT_DEFAULT,
+    time_to_hit: bool = False,
 ) -> np.ndarray:
     """Simulate one asteroid per pixel on ``plane`` (only). Returns RGB (H, W, 3)."""
     if not planets:
@@ -1072,7 +1146,7 @@ def render_basins(
     n = width * height
     print(f"Rendering {width}x{height} slice ({n:,} asteroids on the plane, D={dim})")
     pos = slice_grid_positions(width, height, plane, dim=dim)
-    hit = integrate_asteroids(
+    hit, time = integrate_asteroids(
         pos,
         planets,
         g=g,
@@ -1084,7 +1158,10 @@ def render_basins(
         relativistic=relativistic,
         c_light=c_light,
     )
-    rgb = colorize_hits(hit, planets, width, height)
+    if time_to_hit:
+        rgb = colorize_times(time, t_max, width, height, hit=hit)
+    else:
+        rgb = colorize_hits(hit, planets, width, height)
     if draw_rings:
         rgb = draw_planet_rings(rgb, planets, plane)
     return rgb
@@ -1103,8 +1180,8 @@ def simulate_volume(
     progress_every: int = 50,
     relativistic: bool = False,
     c_light: float = C_LIGHT_DEFAULT,
-) -> tuple[np.ndarray, np.ndarray]:
-    """k-flat lattice for the viewer. Returns (initial_pos, hit) on the CPU."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """k-flat lattice for the viewer. Returns (initial_pos, hit, time) on the CPU."""
     if not planets:
         raise ValueError("Need at least one planet.")
     dim = max(len(p.position) for p in planets)
@@ -1121,7 +1198,7 @@ def simulate_volume(
         f"Subspace grid r={resolution} k={cube.k} D={dim} -> {pos.shape[0]:,} "
         f"asteroids  h={cube.half_extent}"
     )
-    hit = integrate_asteroids(
+    hit, time = integrate_asteroids(
         pos,
         planets,
         g=g,
@@ -1133,7 +1210,7 @@ def simulate_volume(
         relativistic=relativistic,
         c_light=c_light,
     )
-    return cp.asnumpy(pos), cp.asnumpy(hit)
+    return cp.asnumpy(pos), cp.asnumpy(hit), cp.asnumpy(time)
 
 
 def planet_3flat_ball(

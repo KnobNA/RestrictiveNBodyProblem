@@ -36,6 +36,7 @@ class EquilateralBasins(Scene):
     softening = 1e-6
     relativistic = False
     c_light = 10.0
+    time_to_hit = False
 
     # Slice embedding (planets are padded to max(this, their position lengths)).
     dimension = 3
@@ -73,10 +74,12 @@ class EquilateralBasins(Scene):
             softening=self.softening,
             relativistic=self.relativistic,
             c_light=self.c_light,
+            time_to_hit=self.time_to_hit,
         )
 
         out_dir = Path(__file__).resolve().parent / "output"
-        out = out_dir / f"equilateral_basins_{width}x{height}.png"
+        suffix = "_time" if self.time_to_hit else ""
+        out = out_dir / f"equilateral_basins_{width}x{height}{suffix}.png"
         save_basins_png(rgb, out)
 
         image = ImageMobject(str(out))
