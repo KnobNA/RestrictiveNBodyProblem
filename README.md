@@ -16,7 +16,7 @@ GPU-accelerated **basins of attraction** for a *restricted* n-body problem: plan
 
 ## What it does
 
-This is not a free n-body integration of all bodies. The planets stay put (positive mass attracts, negative mass would repel). Each asteroid starts at rest and is integrated with **per-particle RK4** on the GPU (CuPy). By default the force is Newtonian inverse-square gravity (`force_exponent = 3`). A hit is a true geometric collision with an n-sphere of radius `R`, including the segment swept during a step so trajectories cannot tunnel through a planet. Hits are **not** inferred from periapsis. Default color is which planet was hit, in **coordinate time** (a static observer). The image is a map of starting points, not a photograph through curved spacetime.
+This is not a free n-body integration of all bodies. The planets stay put (positive mass attracts, negative mass would repel). Each asteroid starts at rest and is integrated with **per-particle RK4** on the GPU (CuPy). By default the force is Newtonian inverse-square gravity (`force_exponent = 3`). A hit is a true geometric collision with an n-sphere of radius `R`, including the segment swept during a step so trajectories cannot tunnel through a planet. Hits are **not** inferred from periapsis. Default color is which planet was hit, in **coordinate time** (a static observer). The image is a map of initial points.
 
 You can:
 
