@@ -34,6 +34,8 @@ class EquilateralBasins(Scene):
     t_max = 40.0
     force_exponent = 3.0
     softening = 1e-6
+    relativistic = False
+    c_light = 10.0
 
     # Slice embedding (planets are padded to max(this, their position lengths)).
     dimension = 3
@@ -69,6 +71,8 @@ class EquilateralBasins(Scene):
             t_max=self.t_max,
             force_exponent=self.force_exponent,
             softening=self.softening,
+            relativistic=self.relativistic,
+            c_light=self.c_light,
         )
 
         out_dir = Path(__file__).resolve().parent / "output"

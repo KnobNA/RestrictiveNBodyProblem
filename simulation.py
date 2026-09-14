@@ -2,6 +2,11 @@
 
 Asteroids start at rest at sampled initial positions, move in full n-D under
 fixed-planet Newtonian gravity, and stop on a finite-radius collision or timeout.
+
+Optional ``relativistic=True`` uses 1PN test-particle geodesics in a prescribed
+static multi-mass field. Planets are frozen boundary conditions and are not a
+GR-self-consistent spacetime. Visualization and collisions stay in coordinate
+space; relativity only changes how the asteroid gets there.
 """
 
 from __future__ import annotations
@@ -18,6 +23,9 @@ from PIL import Image, ImageDraw
 MAX_SUBSTEPS = 24
 CFL_SAFETY = 0.4
 MIN_STEP = 1e-6
+C_LIGHT_DEFAULT = 10.0
+REL_V_MAX_FRAC = 0.999
+WEAK_FIELD_FRAC = 0.1
 
 
 @dataclass
@@ -448,6 +456,112 @@ def _acceleration(
     return acc
 
 
+def _potential_grad(
+    pos: cp.ndarray,
+    planet_pos: cp.ndarray,
+    planet_mass: cp.ndarray,
+    g: float,
+    softening: float,
+) -> tuple[cp.ndarray, cp.ndarray]:
+    """Newtonian Φ (N,) and ∇Φ (N, D). Φ = -Σ G m / r. Inverse-square only."""
+    phi = cp.zeros(pos.shape[0], dtype=pos.dtype)
+    gphi = cp.zeros_like(pos)
+    eps2 = softening * softening
+    for i in range(planet_pos.shape[0]):
+        r = pos - planet_pos[i]
+        dist2 = cp.sum(r * r, axis=1, keepdims=True) + eps2
+        inv = 1.0 / cp.sqrt(dist2)
+        gm = g * planet_mass[i]
+        phi = phi - gm * inv[:, 0]
+        gphi = gphi + gm * r * (inv ** 3)
+    return phi, gphi
+
+
+def _relativistic_acc(
+    pos: cp.ndarray,
+    vel: cp.ndarray,
+    planet_pos: cp.ndarray,
+    planet_mass: cp.ndarray,
+    g: float,
+    softening: float,
+    c_light: float,
+) -> tuple[cp.ndarray, cp.ndarray]:
+    """1PN geodesic 3-acceleration in coordinate time, plus Φ.
+
+    Restricted test particle in a prescribed static multi-mass field.
+    Planets are frozen boundary conditions, not a GR-self-consistent spacetime.
+    a = -∇Φ (1 + v²/c² + 4Φ/c²) + 4 v (v · ∇Φ) / c²
+    """
+    phi, gphi = _potential_grad(pos, planet_pos, planet_mass, g, softening)
+    c2 = np.float32(c_light * c_light)
+    v2 = cp.sum(vel * vel, axis=1, keepdims=True)
+    v_dot_g = cp.sum(vel * gphi, axis=1, keepdims=True)
+    acc = -gphi * (1.0 + v2 / c2 + (4.0 / c2) * phi[:, None]) + (
+        (4.0 / c2) * vel * v_dot_g
+    )
+    return acc, phi
+
+
+def _eval_acc(
+    pos: cp.ndarray,
+    vel: cp.ndarray,
+    planet_pos: cp.ndarray,
+    planet_mass: cp.ndarray,
+    g: float,
+    force_exponent: float,
+    softening: float,
+    relativistic: bool,
+    c_light: float,
+) -> tuple[cp.ndarray, cp.ndarray | None]:
+    if relativistic:
+        acc, phi = _relativistic_acc(
+            pos, vel, planet_pos, planet_mass, g, softening, c_light
+        )
+        return acc, phi
+    return (
+        _acceleration(pos, planet_pos, planet_mass, g, force_exponent, softening),
+        None,
+    )
+
+
+def _clip_speed(vel: cp.ndarray, c_light: float) -> cp.ndarray:
+    speed = cp.sqrt(cp.sum(vel * vel, axis=1))
+    vmax = np.float32(REL_V_MAX_FRAC * c_light)
+    scale = cp.minimum(np.float32(1.0), vmax / (speed + np.float32(1e-30)))
+    return vel * scale[:, None]
+
+
+def _warn_weak_field(planets: list[Planet], g: float, c_light: float) -> None:
+    """Warn if 2GM/c² is not << planet radius or typical spacing."""
+    c2 = float(c_light) * float(c_light)
+    if c2 <= 0.0:
+        print("Warning: c_light must be positive for relativistic mode.")
+        return
+    dim = max(len(p.position) for p in planets)
+    padded = pad_planets(planets, dim)
+    rs = [2.0 * g * abs(p.mass) / c2 for p in padded]
+    for i, p in enumerate(padded):
+        if rs[i] > WEAK_FIELD_FRAC * p.radius:
+            print(
+                "Warning: weak-field geodesic is a toy here: "
+                f"planet {i + 1} Rs={rs[i]:.4g} vs R={p.radius:g} "
+                "(2GM/c^2 not << radius)."
+            )
+    if len(padded) < 2:
+        return
+    pts = np.asarray([p.position for p in padded], dtype=np.float64)
+    sep = float("inf")
+    for i in range(len(pts)):
+        for j in range(i + 1, len(pts)):
+            sep = min(sep, float(np.linalg.norm(pts[i] - pts[j])))
+    max_rs = max(rs)
+    if sep < float("inf") and max_rs > WEAK_FIELD_FRAC * sep:
+        print(
+            "Warning: weak-field geodesic is a toy here: "
+            f"max Rs={max_rs:.4g} vs planet spacing={sep:.4g}."
+        )
+
+
 def _apply_collisions(
     pos: cp.ndarray,
     alive: cp.ndarray,
@@ -528,11 +642,30 @@ def _advance_subset(
     softening: float,
     cfl_safety: float,
     tiny: np.floating,
-) -> tuple[cp.ndarray, cp.ndarray, cp.ndarray, cp.ndarray, cp.ndarray]:
+    relativistic: bool = False,
+    c_light: float = C_LIGHT_DEFAULT,
+) -> tuple[cp.ndarray, cp.ndarray, cp.ndarray, cp.ndarray, cp.ndarray, float, float]:
     """One CFL-limited RK4 step plus collisions on a (already active) subset."""
-    acc = _acceleration(pos, planet_pos, planet_mass, g, force_exponent, softening)
+    acc, _ = _eval_acc(
+        pos,
+        vel,
+        planet_pos,
+        planet_mass,
+        g,
+        force_exponent,
+        softening,
+        relativistic,
+        c_light,
+    )
     h = _cfl_h(
-        pos, vel, acc, planet_pos, planet_radius, remaining, safety=cfl_safety
+        pos,
+        vel,
+        acc,
+        planet_pos,
+        planet_radius,
+        remaining,
+        safety=cfl_safety,
+        c_light=c_light if relativistic else None,
     )
     new_pos, new_vel = _rk4_step(
         pos,
@@ -544,7 +677,21 @@ def _advance_subset(
         force_exponent,
         softening,
         acc,
+        relativistic=relativistic,
+        c_light=c_light,
     )
+    max_speed = 0.0
+    max_abs_phi = 0.0
+    if relativistic:
+        new_vel = _clip_speed(new_vel, c_light)
+        finite_p = cp.isfinite(new_pos).all(axis=1) & cp.isfinite(new_vel).all(axis=1)
+        if bool(finite_p.any()):
+            spd = cp.sqrt(cp.sum(new_vel[finite_p] * new_vel[finite_p], axis=1))
+            max_speed = float(spd.max())
+            phi_end, _ = _potential_grad(
+                new_pos[finite_p], planet_pos, planet_mass, g, softening
+            )
+            max_abs_phi = float(cp.max(cp.abs(phi_end)))
     alive, hit = _apply_segment_collisions(
         pos, new_pos, alive, hit, planet_pos, planet_radius
     )
@@ -553,11 +700,11 @@ def _advance_subset(
         pos, new_pos, new_vel, alive, hit, planet_pos
     )
     finite = cp.isfinite(new_pos).all(axis=1) & cp.isfinite(new_vel).all(axis=1)
-    write = (h > tiny) & finite
+    write = (h > 0) & finite
     pos = cp.where(write[:, None], new_pos, pos)
     vel = cp.where(write[:, None], new_vel, vel)
     time = cp.where(write, time + h, time)
-    return pos, vel, time, alive, hit
+    return pos, vel, time, alive, hit, max_speed, max_abs_phi
 
 
 def _cfl_h(
@@ -568,6 +715,7 @@ def _cfl_h(
     planet_radius: cp.ndarray,
     remaining: cp.ndarray,
     safety: float = CFL_SAFETY,
+    c_light: float | None = None,
 ) -> cp.ndarray:
     """Largest step that cannot jump more than a fraction of the gap to a surface."""
     dist_surf = cp.full(pos.shape[0], np.float32(np.inf), dtype=pos.dtype)
@@ -581,6 +729,16 @@ def _cfl_h(
     denom = speed + cp.sqrt(2.0 * acc_mag * dist_surf + 1e-30) + 1e-12
     h_cfl = safety * dist_surf / denom
     h = cp.minimum(remaining, h_cfl)
+    if c_light is not None:
+        gap_c = np.float32(REL_V_MAX_FRAC * c_light) - speed
+        h_rel = gap_c / (acc_mag + np.float32(1e-12))
+        cap = gap_c > np.float32(0)
+        # Floor at MIN_STEP so a near-c particle still advances; clip |v| after RK4.
+        h = cp.where(
+            cap,
+            cp.minimum(h, cp.maximum(h_rel, np.float32(MIN_STEP))),
+            h,
+        )
     return cp.maximum(h, np.float32(0))
 
 
@@ -594,21 +752,47 @@ def _rk4_step(
     force_exponent: float,
     softening: float,
     k1_v: cp.ndarray,
+    relativistic: bool = False,
+    c_light: float = C_LIGHT_DEFAULT,
 ) -> tuple[cp.ndarray, cp.ndarray]:
-    """RK4 with a per-particle step ``h`` of shape (N,). ``k1_v`` is acc(pos)."""
+    """RK4 with a per-particle step ``h`` of shape (N,). ``k1_v`` is a(x, v)."""
     ht = h[:, None]
     half = 0.5 * ht
     k1_x = vel
-    k2_v = _acceleration(
-        pos + half * k1_x, planet_pos, planet_mass, g, force_exponent, softening
+    k2_v, _ = _eval_acc(
+        pos + half * k1_x,
+        vel + half * k1_v,
+        planet_pos,
+        planet_mass,
+        g,
+        force_exponent,
+        softening,
+        relativistic,
+        c_light,
     )
     k2_x = vel + half * k1_v
-    k3_v = _acceleration(
-        pos + half * k2_x, planet_pos, planet_mass, g, force_exponent, softening
+    k3_v, _ = _eval_acc(
+        pos + half * k2_x,
+        vel + half * k2_v,
+        planet_pos,
+        planet_mass,
+        g,
+        force_exponent,
+        softening,
+        relativistic,
+        c_light,
     )
     k3_x = vel + half * k2_v
-    k4_v = _acceleration(
-        pos + ht * k3_x, planet_pos, planet_mass, g, force_exponent, softening
+    k4_v, _ = _eval_acc(
+        pos + ht * k3_x,
+        vel + ht * k3_v,
+        planet_pos,
+        planet_mass,
+        g,
+        force_exponent,
+        softening,
+        relativistic,
+        c_light,
     )
     k4_x = vel + ht * k3_v
     sixth = ht / 6.0
@@ -629,6 +813,8 @@ def integrate_asteroids(
     progress_every: int = 50,
     cfl_safety: float = CFL_SAFETY,
     max_substeps: int = MAX_SUBSTEPS,
+    relativistic: bool = False,
+    c_light: float = C_LIGHT_DEFAULT,
 ) -> cp.ndarray:
     """RK4-integrate asteroids from rest until collision or ``t_max``.
 
@@ -640,9 +826,16 @@ def integrate_asteroids(
     Hits are counted only when the body overlaps a planet or the accepted
     segment intersects it — never by predicted periapsis. Collided and
     timed-out asteroids are dropped from the GPU work set each iteration.
+
+    When ``relativistic`` is True, motion is 1PN geodesic acceleration in a
+    prescribed static multi-mass field (planets frozen, not GR-self-consistent).
+    That path always uses inverse-square Φ (``force_exponent`` is ignored).
+    Collisions stay Euclidean n-spheres. Visualization is coordinate time.
     """
     if not planets:
         raise ValueError("Need at least one planet.")
+    if relativistic and float(c_light) <= 0.0:
+        raise ValueError("c_light must be positive when relativistic=True.")
 
     dim, planet_pos, planet_mass, planet_radius = _planet_arrays(planets, dtype=pos.dtype)
     if pos.ndim != 2 or pos.shape[1] != dim:
@@ -657,15 +850,28 @@ def integrate_asteroids(
     hit = cp.full(n, -1, dtype=cp.int32)
     time = cp.zeros(n, dtype=pos.dtype)
     tiny = np.float32(MIN_STEP)
+    max_speed = 0.0
+    max_abs_phi = 0.0
 
     alive, hit = _apply_collisions(pos, alive, hit, planet_pos, planet_radius)
 
     max_steps = max(1, math.ceil(t_max / dt))
     max_iters = max_steps * max_substeps
-    print(
-        f"RK4+CFL: {n:,} asteroids, t_max={t_max}, dt<={dt}, "
-        f"max_iters={max_iters}"
-    )
+    mode = "RK4+CFL"
+    if relativistic:
+        mode = "RK4+CFL 1PN geodesic"
+        print(
+            f"{mode}: {n:,} asteroids, t_max={t_max}, dt<={dt}, "
+            f"c_light={c_light}, max_iters={max_iters} "
+            "(restricted test particle in a prescribed static multi-mass field; "
+            "planets are frozen, not GR-self-consistent)"
+        )
+        _warn_weak_field(planets, g, c_light)
+    else:
+        print(
+            f"{mode}: {n:,} asteroids, t_max={t_max}, dt<={dt}, "
+            f"max_iters={max_iters}"
+        )
 
     for iteration in range(1, max_iters + 1):
         remaining = cp.where(alive, np.float32(t_max) - time, np.float32(0))
@@ -691,7 +897,7 @@ def integrate_asteroids(
             break
 
         if n_active == n:
-            pos, vel, time, alive, hit = _advance_subset(
+            pos, vel, time, alive, hit, step_speed, step_phi = _advance_subset(
                 pos,
                 vel,
                 time,
@@ -706,9 +912,11 @@ def integrate_asteroids(
                 softening,
                 cfl_safety,
                 tiny,
+                relativistic=relativistic,
+                c_light=c_light,
             )
         else:
-            p, v, t, a, h = _advance_subset(
+            p, v, t, a, h, step_speed, step_phi = _advance_subset(
                 pos[idx],
                 vel[idx],
                 time[idx],
@@ -723,12 +931,17 @@ def integrate_asteroids(
                 softening,
                 cfl_safety,
                 tiny,
+                relativistic=relativistic,
+                c_light=c_light,
             )
             pos[idx] = p
             vel[idx] = v
             time[idx] = t
             alive[idx] = a
             hit[idx] = h
+        if relativistic:
+            max_speed = max(max_speed, step_speed)
+            max_abs_phi = max(max_abs_phi, step_phi)
     else:
         n_alive = int(alive.sum())
         print(
@@ -740,6 +953,12 @@ def integrate_asteroids(
     if n_alive:
         print(
             f"done  timed out={n_alive:,}/{n:,} ({100.0 * n_alive / n:.1f}% unresolved)"
+        )
+    if relativistic:
+        c2 = float(c_light) * float(c_light)
+        print(
+            f"relativistic diagnostics: max |v|/c = {max_speed / float(c_light):.4g}, "
+            f"max |Phi|/c^2 = {max_abs_phi / c2:.4g}"
         )
     return hit
 
@@ -827,6 +1046,8 @@ def render_basins(
     softening: float = 1e-6,
     progress_every: int = 50,
     draw_rings: bool = True,
+    relativistic: bool = False,
+    c_light: float = C_LIGHT_DEFAULT,
 ) -> np.ndarray:
     """Simulate one asteroid per pixel on ``plane`` (only). Returns RGB (H, W, 3)."""
     if not planets:
@@ -860,6 +1081,8 @@ def render_basins(
         force_exponent=force_exponent,
         softening=softening,
         progress_every=progress_every,
+        relativistic=relativistic,
+        c_light=c_light,
     )
     rgb = colorize_hits(hit, planets, width, height)
     if draw_rings:
@@ -878,6 +1101,8 @@ def simulate_volume(
     force_exponent: float = 3.0,
     softening: float = 1e-6,
     progress_every: int = 50,
+    relativistic: bool = False,
+    c_light: float = C_LIGHT_DEFAULT,
 ) -> tuple[np.ndarray, np.ndarray]:
     """k-flat lattice for the viewer. Returns (initial_pos, hit) on the CPU."""
     if not planets:
@@ -905,6 +1130,8 @@ def simulate_volume(
         force_exponent=force_exponent,
         softening=softening,
         progress_every=progress_every,
+        relativistic=relativistic,
+        c_light=c_light,
     )
     return cp.asnumpy(pos), cp.asnumpy(hit)
 

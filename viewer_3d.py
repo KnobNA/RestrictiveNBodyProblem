@@ -48,6 +48,8 @@ DT = 0.02
 T_MAX = 40.0
 FORCE_EXPONENT = 3.0
 SOFTENING = 1e-6
+RELATIVISTIC = False
+C_LIGHT = 10.0
 POINT_SIZE = 4.0
 HOVER_DIM_ALPHA = 0.12
 
@@ -149,6 +151,8 @@ def load_model(path: str | Path) -> dict:
         positions = np.asarray(data["positions"], dtype=np.float32)
         hit = np.asarray(data["hit"], dtype=np.int32)
     version = int(meta.get("version", 1))
+    meta.setdefault("relativistic", False)
+    meta.setdefault("c_light", 10.0)
     if version >= 2:
         cube = NDCube(
             center=tuple(float(x) for x in meta["cube_center"]),
@@ -700,6 +704,8 @@ def _controls_window(
                     "t_max": T_MAX,
                     "force_exponent": FORCE_EXPONENT,
                     "softening": SOFTENING,
+                    "relativistic": RELATIVISTIC,
+                    "c_light": C_LIGHT,
                 },
             )
         except Exception as exc:
@@ -750,6 +756,8 @@ def _simulate_new() -> dict:
         t_max=T_MAX,
         force_exponent=FORCE_EXPONENT,
         softening=SOFTENING,
+        relativistic=RELATIVISTIC,
+        c_light=C_LIGHT,
     )
     return {
         "positions": positions,
