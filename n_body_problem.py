@@ -12,15 +12,15 @@ from pathlib import Path
 from manim import ImageMobject, Scene, config
 
 from simulation import (
+    PLANETS,
     SlicePlane,
-    equilateral_triangle_planets,
     render_basins,
     save_basins_png,
 )
 
 
 class EquilateralBasins(Scene):
-    """Restricted 3-body basins on a plane through an equilateral triangle.
+    """Restricted n-body basins on a 2D slice. Planets come from ``PLANETS``.
 
     Tune the class attributes below, then render a still with::
 
@@ -35,16 +35,8 @@ class EquilateralBasins(Scene):
     force_exponent = 3.0
     softening = 1e-6
 
-    # Planets live in this many dimensions (extra coords are 0 for the triangle).
+    # Slice embedding (planets are padded to max(this, their position lengths)).
     dimension = 3
-    mass = 1.0
-    radius = 0.05
-    triangle_side = 1.0
-    colors = (
-        (255, 92, 87),
-        (91, 192, 222),
-        (132, 204, 107),
-    )
 
     # Three n-D points define the plane: P0 origin, P1-P0 image +x, P2-P0 image +y.
     # view_height is how much of the plane is shown (width follows image aspect).
@@ -59,13 +51,7 @@ class EquilateralBasins(Scene):
     def construct(self):
         width = int(config.pixel_width)
         height = int(config.pixel_height)
-        planets = equilateral_triangle_planets(
-            side=self.triangle_side,
-            mass=self.mass,
-            radius=self.radius,
-            colors=self.colors,
-            dim=self.dimension,
-        )
+        planets = PLANETS
         plane = self._slice_plane(width, height)
         print(
             f"Slice plane origin={plane.origin}  "

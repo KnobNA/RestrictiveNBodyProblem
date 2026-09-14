@@ -24,7 +24,21 @@ You can:
 - Sample a **k-dimensional cube** of initial conditions and inspect it in an interactive **3D viewer**. The white box is the first three cube axes. Extra axes (`u4…uk`) are chosen with sliders. Lattice slices parallel to `yz` / `xz` / `xy` can be toggled. Planet balls are the n-sphere ∩ current 3-flat.
 - **Save / open** a 3D run as `.npz` so you can explore a long simulation without recomputing it.
 
-Default planets are three equal masses on an equilateral triangle in the first two coordinates (extra coordinates `0`).
+Default planets are the ``PLANETS`` list in [`simulation.py`](simulation.py) (equilateral triangle in `xy`). Edit that list to change count, position, mass, radius, color, or embedding dimension. The length of each ``position`` is that planet’s dimension; shorter tuples pad extra coordinates with `0`, so a 3D planet and a 4D planet can share one simulation.
+
+## Planets
+
+In [`simulation.py`](simulation.py), each row of `PLANETS` is independent:
+
+```python
+PLANETS = [
+    Planet(position=(0.0, 0.577), mass=1.0, radius=0.05, color=(255, 92, 87)),
+    Planet(position=(-0.5, -0.289), mass=1.0, radius=0.05, color=(91, 192, 222)),
+    Planet(position=(0.5, -0.289), mass=1.0, radius=0.05, color=(132, 204, 107)),
+]
+```
+
+Add or remove `Planet(...)` entries for more than three bodies. A 3D location is `(x, y, z)`; a 4D location is `(x, y, z, w)`. Both the 2D scene and the 3D viewer use this list.
 
 ## Requirements
 
@@ -67,9 +81,8 @@ Edit the class attributes at the top of [`n_body_problem.py`](n_body_problem.py)
 
 | Knob | Meaning |
 | --- | --- |
-| `dimension` | Ambient dimension `D` (triangle sits in `xy`; extra coords are `0`) |
+| `dimension` | Slice embedding `D` (planets pad to `max(D, their position lengths)`) |
 | `G`, `dt`, `t_max` | Gravity strength, max RK4 step, integration cutoff |
-| `mass`, `radius`, `triangle_side`, `colors` | Planet properties |
 | `plane_points` | Three n-D points: origin, image `+x`, image `+y`. `None` uses `view_center` in `xy` |
 | `view_height` | Height of the framed rectangle on that plane (width follows image aspect) |
 
@@ -91,7 +104,7 @@ Edit the knobs at the top of [`viewer_3d.py`](viewer_3d.py) **before** starting 
 | `RESOLUTION` (`r`) | Lattice points per cube axis |
 | `HALF_EXTENT` (`h`) | Cube coordinates run through `[-h, h]` on each axis |
 | `CUBE_CENTER`, `CUBE_AXES` | Center `C` and `k` spanning vectors. First three axes are the visible box; further vectors add extra dimensions and sliders |
-| `G`, `DT`, `T_MAX`, masses, radii | Same physics as the 2D scene |
+| `G`, `DT`, `T_MAX` | Same physics as the 2D scene |
 
 Asteroid count is **`r^k`**. Example: `r = 48`, four axes → about **5.3 million** asteroids. That is slow and memory-heavy; drop `r` or `k` while experimenting.
 

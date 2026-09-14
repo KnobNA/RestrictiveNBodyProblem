@@ -22,12 +22,40 @@ MIN_STEP = 1e-6
 
 @dataclass
 class Planet:
-    """A fixed mass in the restricted n-body problem."""
+    """A fixed mass in the restricted n-body problem.
+
+    ``position`` length is this planet's embedding dimension. Shorter tuples
+    are padded with zeros to the run's ambient ``D`` (a 3D planet in 4D sits
+    at ``w = 0``).
+    """
 
     position: tuple[float, ...]
     mass: float
     radius: float
     color: tuple[int, int, int]
+
+
+# Edit this list for a new setup. Default = equilateral triangle in xy (side 1).
+PLANETS = [
+    Planet(
+        position=(0.0, 1.0 / math.sqrt(3.0)),
+        mass=1.0,
+        radius=0.05,
+        color=(255, 92, 87),
+    ),
+    Planet(
+        position=(-0.5, -0.5 / math.sqrt(3.0)),
+        mass=1.0,
+        radius=0.05,
+        color=(91, 192, 222),
+    ),
+    Planet(
+        position=(0.5, -0.5 / math.sqrt(3.0)),
+        mass=1.0,
+        radius=0.05,
+        color=(132, 204, 107),
+    ),
+]
 
 
 @dataclass
@@ -294,10 +322,10 @@ def equilateral_triangle_planets(
 
 
 def _planet_arrays(planets: list[Planet], dtype=cp.float32):
-    dims = {len(p.position) for p in planets}
-    if len(dims) != 1:
-        raise ValueError("All planets must have the same position dimension.")
-    dim = dims.pop()
+    if not planets:
+        raise ValueError("Need at least one planet.")
+    dim = max(len(p.position) for p in planets)
+    planets = pad_planets(planets, dim)
     pos = cp.asarray([p.position for p in planets], dtype=dtype)
     mass = cp.asarray([p.mass for p in planets], dtype=dtype)
     radius = cp.asarray([p.radius for p in planets], dtype=dtype)

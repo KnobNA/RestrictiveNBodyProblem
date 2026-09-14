@@ -23,9 +23,9 @@ from vispy.visuals.transforms import STTransform
 use("glfw")
 
 from simulation import (
+    PLANETS,
     NDCube,
     Planet,
-    equilateral_triangle_planets,
     lattice_sample_values,
     planet_3flat_ball,
     simulate_volume,
@@ -48,9 +48,6 @@ DT = 0.02
 T_MAX = 40.0
 FORCE_EXPONENT = 3.0
 SOFTENING = 1e-6
-MASS = 1.0
-RADIUS = 0.05
-TRIANGLE_SIDE = 1.0
 POINT_SIZE = 4.0
 HOVER_DIM_ALPHA = 0.12
 
@@ -742,13 +739,7 @@ def _controls_window(
 
 def _simulate_new() -> dict:
     cube = NDCube(center=CUBE_CENTER, axes=CUBE_AXES, half_extent=HALF_EXTENT)
-    dim = max(cube.dim, 3)
-    planets = equilateral_triangle_planets(
-        side=TRIANGLE_SIDE,
-        mass=MASS,
-        radius=RADIUS,
-        dim=dim,
-    )
+    planets = PLANETS
     print("Simulating n-D volume lattice (this can take a while)...")
     positions, hit = simulate_volume(
         planets,
